@@ -1,20 +1,17 @@
 ﻿/*
  * Breeze Labs Azure Mobile Services DataServiceAdapter
  *
- *  v.0.5.1
+ *  v.0.6.2
  *
  * Registers an Azure Mobile Services DataServiceAdapter with Breeze
  *
- * REQUIRES breeze.labs.dataservice.abstractrest.js
+ * REQUIRES breeze.labs.dataservice.abstractrest.js v.0.6.0+
  *
  * This adapter cannot get metadata from the server because mobile services does not provide metadata.
  *
  * Typical usage in Angular
  *    // configure breeze to use Azure Mobile Services dataservice adapter
  *    var dsAdapter = breeze.config.initializeAdapterInstance('dataService', 'azure-mobile-services', true);
- *
- *    // if using $q for promises ...
- *    dsAdapter.Q = $q;
  *
  *    // provide the mobile services information specific to your app
  *    adapter.mobileServicesInfo = {
@@ -33,19 +30,19 @@
  * If 'saveOnlyOne' == true, the adapter throws an exception
  * when asked to save more than one entity at a time.
  *
- * Copyright 2014 IdeaBlade, Inc.  All Rights Reserved.
+ * Copyright 2015 IdeaBlade, Inc.  All Rights Reserved.
  * Licensed under the MIT License
  * http://opensource.org/licenses/mit-license.php
  * Author: Ward Bell
  */
-(function (definition, window) {
-    if (window.breeze) {
-        definition(window.breeze);
+(function (definition) {
+    if (typeof breeze === "object") {
+        definition(breeze);
     } else if (typeof require === "function" && typeof exports === "object" && typeof module === "object") {
         // CommonJS or Node
         var b = require('breeze');
         definition(b);
-    } else if (typeof define === "function" && define["amd"] && !window.breeze) {
+    } else if (typeof define === "function" && define["amd"]) {
         // Requirejs / AMD
         define(['breeze'], definition);
     } else {
@@ -61,16 +58,16 @@
 
     function typeInitialize() {
         // Delay setting the prototype until we're sure AbstractRestDataServiceAdapter is loaded
-        var fn = breeze.AbstractRestDataServiceAdapter.prototype;
-        fn = breeze.core.extend(ctor.prototype, fn);
+        var proto = breeze.AbstractRestDataServiceAdapter.prototype;
+        proto = breeze.core.extend(ctor.prototype, proto);
 
-        fn.executeQuery = executeQuery;
+        proto.executeQuery = executeQuery;
 
-        fn._createErrorFromResponse = _createErrorFromResponse;
-        fn._createJsonResultsAdapter = _createJsonResultsAdapter;
-        fn._createSaveRequest = _createSaveRequest;
-        fn._createUniqueInstallationId = _createUniqueInstallationId;
-        fn._getZumoHeaders = _getZumoHeaders;
+        proto._createErrorFromResponse = _createErrorFromResponse;
+        proto._createChangeRequest = _createChangeRequest;
+        proto._createJsonResultsAdapter = _createJsonResultsAdapter;
+        proto._createUniqueInstallationId = _createUniqueInstallationId;
+        proto._getZumoHeaders = _getZumoHeaders;
 
         this.initialize(); // the revised initialize()
     }
@@ -78,15 +75,20 @@
     breeze.config.registerAdapter("dataService", ctor);
 
     /////////////////
-    function _createErrorFromResponse(response, url) {
-        var result = new Error();
-        result.response = response;
+    // Create error object for both query and save responses.
+    // A method on the adapter (`this`)
+    // 'context' can help differentiate query and save
+    // 'errorEntity' only defined for save response
+    function _createErrorFromResponse(response, url, context, errorEntity) {
+        var err = new Error();
+        err.response = response;
         var data = response.data || {};
-        if (url) { result.url = url; }
-        result.status =  data.code || response.status || '???';
-        result.statusText = response.statusText || result.status;
-        result.message =  data.error || response.message || response.statusText;
-        return result;
+        if (url) { err.url = url; }
+        err.status =  data.code || response.status || '???';
+        err.statusText = response.statusText || err.status;
+        err.message =  data.error || response.message || response.error || err.statusText;
+        this._catchNoConnectionError(err);
+        return err;
     }
 
     function _createJsonResultsAdapter() {
@@ -99,14 +101,14 @@
 
         function visitNode(node, mappingContext) {
             // mappingContext.entityType could be set for a queryResult
-            // node.$entityType set when node is from a saveResult (see _processSavedEntity)
+            // node.$entityType set when node is from a change response (see _processSavedEntity)
             var entityType =  mappingContext.entityType || node.$entityType ||
                 dataServiceAdapter._getEntityTypeFromMappingContext(mappingContext);
             return (entityType) ? { entityType: entityType } : {}
         }
     }
 
-    function _createSaveRequest(saveContext, entity, index) {
+    function _createChangeRequest(saveContext, entity, index) {
         var data, rawEntity, request;
         var type = entity.entityType;
         var rn = type.defaultResourceName;
@@ -198,10 +200,10 @@
     }
 
     function executeQuery(mappingContext) {
-        var adapter = this;
+        var adapter = mappingContext.adapter = this;
         mappingContext.entityType = adapter._getEntityTypeFromMappingContext(mappingContext);
         var deferred = adapter.Q.defer();
-        var url = mappingContext.getUrl();//  + 'XXXX'; // deliberate fail
+        var url = mappingContext.getUrl();
         var headers = adapter._getZumoHeaders();
 
         adapter._ajaxImpl.ajax({
@@ -211,24 +213,27 @@
             params: mappingContext.query.parameters,
             success: querySuccess,
             error: function (response) {
-                deferred.reject(adapter._createErrorFromResponse(response, url));
+                deferred.reject(adapter._createErrorFromResponse(response, url, mappingContext));
             }
         });
         return deferred.promise;
 
         function querySuccess(response) {
             try {
-                var data = response.data;
                 var rData = {
-                    results: data,
+                    results: adapter._getResponseData(response),
                     httpResponse: response
                 };
                 deferred.resolve(rData);
             } catch (e) {
-                // program error means adapter it broken, not SP or the user
-                deferred.reject(new Error("Program error: failed while parsing successful query response"));
+                // if here, the adapter is broken, not bad data
+                var err = new Error("Query failed while parsing successful query response")
+                err.name = "Program Error";
+                err.response = response;
+                err.originalError = e;
+                deferred.reject(err);
             }
         }
     }
 
-}, this));
+}));
